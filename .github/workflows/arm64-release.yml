@@ -11,51 +11,75 @@ on:
 jobs:
   pull_and_package:
     runs-on: ubuntu-22.04
+    # 授予写入 Release 的权限
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 关键步骤 1：设置 QEMU 以支持多架构镜像处理
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      # 关键步骤 2：拉取、校验并打包镜像
       - name: Pull Docker Images and Package
         run: |
           images="${{ github.event.inputs.docker_images }}"
           IFS=',' read -r -a image_array <<< "$images"
+          
           for image in "${image_array[@]}"; do
+            echo "--- Processing: $image ---"
+            
+            # 强制指定平台拉取
             docker pull "${image}" --platform "linux/arm64"
-            image_name="${image//\//_}"
-            image_name="${image_name//:/_}"
-            docker save "${image}" -o "${image_name}-arm64.tar"
-            gzip -c "${image_name}-arm64.tar" > "${image_name}-arm64.tar.gz"
-            rm "${image_name}-arm64.tar"
+            
+            # 架构校验：确保拉取到的是 arm64，否则报错停止工作流
+            ARCH=$(docker inspect "${image}" --format='{{.Architecture}}')
+            echo "Detected architecture: $ARCH"
+            
+            if [ "$ARCH" != "arm64" ] && [ "$ARCH" != "aarch64" ]; then
+              echo "Error: Image $image is $ARCH, NOT arm64! Skipping or failing..."
+              exit 1
+            fi
+
+            # 文件名处理：替换斜杠和冒号为下划线
+            safe_name=$(echo "${image}" | sed 's/[\/:]/_/g')
+            
+            # 打包并压缩
+            docker save "${image}" -o "${safe_name}-arm64.tar"
+            gzip -f "${safe_name}-arm64.tar"
+            
+            echo "Successfully packaged: ${safe_name}-arm64.tar.gz"
           done
 
-      - name: List generated files (debug step)
+      - name: Prepare Release Info
         run: |
-          echo "Preparing docker images list (.tar.gz) files:"
-          find $GITHUB_WORKSPACE -name "*.tar.gz"
           release_name=$(TZ="Asia/Shanghai" date +'%Y-%m-%d %H:%M Build')
           echo "RELEASE_NAME=$release_name" >> $GITHUB_ENV
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@master
+      # 关键步骤 3：创建 Release 并上传所有压缩包（合并为一个步骤更稳健）
+      - name: Create and Upload Release Assets
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: DockerTarBuilder-ARM64
-          name: ${{ env.RELEASE_NAME }} for ARM64
+          name: ${{ env.RELEASE_NAME }} (ARM64)
           body: |
-            [![Github](https://img.shields.io/badge/RELEASE:DockerTarBuilder-123456?logo=github&logoColor=fff&labelColor=green&style=for-the-badge)](https://www.bilibili.com/video/BV1EZ421M7mL) [![Github](https://img.shields.io/badge/国内加速站下载-FC7C0D?logo=github&logoColor=fff&labelColor=000&style=for-the-badge)](https://wkdaily.cpolar.top/archives/1)
-            ### How to use? For example
-            `docker load -i alpine_latest.tar.gz `
-            ### Video teaching
-            [![Bilibili](https://img.shields.io/badge/Bilibili-123456?logo=bilibili&logoColor=fff&labelColor=fb7299)](https://www.bilibili.com/video/BV1yyq6YREdF)
+            ### 🛠 自动构建信息
+            - **架构**: ARM64 (linux/arm64)
+            - **构建时间**: ${{ env.RELEASE_NAME }}
+            
+            ### 📥 使用方法
+            下载后在 ARM 架构机器上执行：
+            ```bash
+            docker load -i <文件名>.tar.gz
+            ```
+            
+            [![Github](https://img.shields.io/badge/RELEASE-DockerTarBuilder-green?style=for-the-badge)](https://github.com/${{ github.repository }})
+          files: |
+            *.tar.gz
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload Docker images as release assets
-        uses: softprops/action-gh-release@v2.1.0
-        with:
-          tag_name: DockerTarBuilder-ARM64
-          files: ${{ github.workspace }}/*.tar.gz
-          token: ${{ secrets.GITHUB_TOKEN }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
